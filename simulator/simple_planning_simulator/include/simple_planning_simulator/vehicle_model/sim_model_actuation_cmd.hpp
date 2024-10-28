@@ -19,6 +19,7 @@
 #include "eigen3/Eigen/Core"
 #include "eigen3/Eigen/LU"
 #include "simple_planning_simulator/utils/csv_loader.hpp"
+#include "simple_planning_simulator/utils/steering_controller.hpp"
 #include "simple_planning_simulator/vehicle_model/sim_model_interface.hpp"
 
 #include <deque>
@@ -27,6 +28,8 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+using autoware::simple_planning_simulator::utils::steering_controller::SteeringController;
 
 /**
  * @class ActuationMap
@@ -101,7 +104,7 @@ public:
 class SimModelActuationCmd : public SimModelInterface
 {
 public:
-  enum class ActuationSimType { VGR, STEER_MAP };
+  enum class ActuationSimType { VGR, CONTROLLER, STEER_MAP };
 
   /**
    * @brief constructor (adaptive gear ratio conversion model)
@@ -230,6 +233,8 @@ private:
   double vgr_coef_b_;
   double vgr_coef_c_;
 
+  // steering controller model
+  SteeringController steering_controller_;
   ActuationSimType actuation_sim_type_{ActuationSimType::VGR};
 
   /**

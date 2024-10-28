@@ -168,6 +168,37 @@ SimModelActuationCmd::SimModelActuationCmd(
   convert_accel_cmd_ = convert_accel_cmd && accel_map_.readActuationMapFromCSV(accel_map_path);
   convert_brake_cmd_ = convert_brake_cmd && brake_map_.readActuationMapFromCSV(brake_map_path);
   actuation_sim_type_ = ActuationSimType::VGR;
+
+  const std::map<std::string, double> params = {
+    {"kp", 386.9151820510161},
+    {"ki", 5.460970982628869},
+    {"kd", 0.03550834077602694},
+    {"ff_gain", 0.03051963576179274},
+    {"angle_limit", 10.0},
+    {"rate_limit", 3.0},
+    {"dead_zone_threshold", 0.00708241866710033},
+    {"a", 0.15251276182076065},
+    {"b", -0.17301900674117585},
+    {"c", 1.5896528355739639},
+    {"d", 0.002300899817071436},
+    {"e", -0.0418928856764797},
+    {"f", 0.18449047960081838},
+    {"g", -0.06320887302605509},
+    {"h", 0.18696796150634806},
+    {"inertia", 25.17844747941984},
+    {"damping", 117.00653795106054},
+    {"stiffness", 0.17526182368541224},
+    {"friction", 0.6596571248682918},
+    {"vgr_coef_a", 2.4181735349544224},
+    {"vgr_coef_b", -0.013434076966833082},
+    {"vgr_coef_c", -0.033963661615283594},
+    {"delay_time", 0.0007641271506616108}};
+
+  steering_controller_ = SteeringController(
+    {params.at("kp"), params.at("ki"), params.at("kd")},
+    {params.at("angle_limit"), params.at("rate_limit"), params.at("inertia"), params.at("damping"),
+     params.at("stiffness"), params.at("friction"), params.at("dead_zone_threshold")},
+    params);
 }
 
 double SimModelActuationCmd::getX()
@@ -246,6 +277,56 @@ void SimModelActuationCmd::initializeInputQueue(const double & dt)
   const size_t steer_input_queue_size = static_cast<size_t>(round(steer_delay_ / dt));
   steer_input_queue_.resize(steer_input_queue_size);
   std::fill(steer_input_queue_.begin(), steer_input_queue_.end(), 0.0);
+}
+
+void SimModelActuationCmd::updateRungeKuttaWithController(const double input_angle, const double speed, const double prev_input_angle, const double dt){
+  using autoware_vehicle_msgs::msg::GearCommand;
+
+  const double vel = std::clamp(state(IDX::VX), -vx_lim_, vx_lim_);
+  const double acc = std::clamp(state(IDX::ACCX), -vx_rate_lim_, vx_rate_lim_);
+  const double yaw = state(IDX::YAW);
+  const double steer = state(IDX::STEER);
+
+  const double accel = input(IDX_U::ACCEL_DES);
+  const double brake = input(IDX_U::BRAKE_DES);
+  const auto gear = input(IDX_U::GEAR);
+
+  // 1) calculate acceleration by accel and brake command
+  const double acc_des_wo_slope = std::clamp(
+    std::invoke([&]() -> double {
+      // Select the non-zero value between accel and brake and calculate the acceleration
+      if (convert_accel_cmd_ && accel > 0.0) {
+        // convert accel command to acceleration
+        return accel_map_.getControlCommand(accel, vel);
+      } else if (convert_brake_cmd_ && brake > 0.0) {
+        // convert brake command to acceleration
+        return brake_map_.getControlCommand(brake, vel);
+      } else {
+        // if conversion is disabled, accel command is directly used as acceleration
+        return accel;
+      }
+    }),
+    -vx_rate_lim_, vx_rate_lim_);
+  // add slope acceleration considering the gear state
+  const double acc_by_slope = input(IDX_U::SLOPE_ACCX);
+  const double acc_des = std::invoke([&]() -> double {
+    if (gear == GearCommand::NONE || gear == GearCommand::PARK) {
+      return 0.0;
+    } else if (gear == GearCommand::REVERSE || gear == GearCommand::REVERSE_2) {
+      return -acc_des_wo_slope + acc_by_slope;
+    }
+    return acc_des_wo_slope + acc_by_slope;
+  });
+  const double acc_time_constant = accel > 0.0 ? accel_time_constant_ : brake_time_constant_;
+  const double d_acc = -(acc - acc_des) / acc_time_constant;
+
+  // 2) calculate steering rate by steer command
+  const double steer_des = calculateSteeringTireCommand(vel, steer, input(IDX_U::STEER_DES));
+
+  steering_controller_.update_runge_kutta(steer_des, speed, prev_input_angle, dt);
+
+
+  
 }
 
 Eigen::VectorXd SimModelActuationCmd::calcModel(
