@@ -84,7 +84,10 @@ double PIDController::compute(
 {
   const double p_term = kp_ * error;
   const double i_term = ki_ * integral;
-  const double d_term = kd_ * (error - prev_error) / dt;
+  const double d_term = dt < 1e-6 ? 0.0 : kd_ * (error - prev_error) / dt;
+
+  std::cerr << "p_term: " << p_term << " i_term: " << i_term << " d_term: " << d_term << " dt: " << dt
+            << std::endl;
   return p_term + i_term + d_term;
 }
 
@@ -159,6 +162,11 @@ SteeringDynamicsState SteeringDynamics::get_state() const
   return state_;
 }
 
+void SteeringDynamics::set_steer(const double steer)
+{
+  state_.angular_position = steer;
+}
+
 void SteeringDynamics::clear_state()
 {
   state_ = {0.0, 0.0, false};
@@ -176,7 +184,39 @@ SteeringController::SteeringController(
 {
 }
 
-double SteeringController::update_kutta_update(
+void SteeringController::set_steer(const double steer)
+{
+  steering_dynamics_.set_steer(steer);
+}
+
+double SteeringController::update_euler(
+  const double input_angle, const double speed, const double prev_input_angle, const double dt)
+{
+  const auto dynamics_state = steering_dynamics_.get_state();
+
+  const auto d_state =
+    run_one_step(input_angle, speed, prev_input_angle, dt, delay_buffer_, pid_, steering_dynamics_);
+
+  const double d_angular_position = d_state.dynamics_d_state.d_angular_position;
+  const double d_angular_velocity = d_state.dynamics_d_state.d_angular_velocity;
+
+  auto dynamics_state_new = dynamics_state;
+  dynamics_state_new.angular_position = std::clamp(
+    dynamics_state.angular_position + d_angular_position * dt, -params_.at("angle_limit"),
+    params_.at("angle_limit"));
+  dynamics_state_new.angular_velocity = std::clamp(
+    dynamics_state.angular_velocity + d_angular_velocity * dt, -params_.at("rate_limit"),
+    params_.at("rate_limit"));
+  dynamics_state_new.is_in_dead_zone = d_state.is_in_dead_zone;
+  steering_dynamics_.set_state(dynamics_state_new);
+
+  pid_.update_state(d_state.pid_error, dt);
+  delay_buffer_ = d_state.delay_buffer;
+
+  return dynamics_state_new.angular_position;
+}
+
+double SteeringController::update_runge_kutta(
   const double input_angle, const double speed, const double prev_input_angle, const double dt)
 {
   const auto dynamics_state = steering_dynamics_.get_state();
@@ -238,7 +278,7 @@ double SteeringController::update_kutta_update(
   pid_.update_state(k4.pid_error, dt);
   delay_buffer_ = k4.delay_buffer;
 
-  return dynamics_state.angular_position;
+  return dynamics_state_new.angular_position;
 }
 
 StepResult SteeringController::run_one_step(
@@ -283,6 +323,20 @@ StepResult SteeringController::run_one_step(
   }
 
   const auto d_state = dynamics.calc_model(dynamics.get_state(), delayed_torque_opt.value());
+  // const auto d_state = dynamics.calc_model(dynamics.get_state(), steering_torque);
+
+  // debug print
+  std::cerr << "input_angle: " << input_angle << std::endl;
+  std::cerr << "limited_input_angle: " << limited_input_angle << std::endl;
+  std::cerr << "ff_torque: " << ff_torque << std::endl;
+  std::cerr << "pid_error: " << pid_error << std::endl;
+  std::cerr << "pid_torque: " << pid_torque << std::endl;
+  std::cerr << "total_torque: " << total_torque << std::endl;
+  std::cerr << "steering_torque: " << steering_torque << std::endl;
+  // std::cerr << "delayed_torque: " << delayed_torque_opt.value() << std::endl;
+  std::cerr << "d_angular_position: " << d_state.d_angular_position << std::endl;
+  std::cerr << "d_angular_velocity: " << d_state.d_angular_velocity << std::endl;
+
 
   return {delay_buffer_new, pid_error, d_state, false};
 }

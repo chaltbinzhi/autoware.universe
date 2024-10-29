@@ -72,7 +72,7 @@ public:
   void clear_state();
 
 private:
-  double kp_, ki_, kd_;
+  double kp_{0.0}, ki_{0.0}, kd_{0.0};
   PIDControllerState state_;
 };
 
@@ -89,15 +89,15 @@ struct SteeringDynamicsParams
 
 struct SteeringDynamicsState
 {
-  double angular_position;
-  double angular_velocity;
-  bool is_in_dead_zone;
+  double angular_position{0.0};
+  double angular_velocity{0.0};
+  bool is_in_dead_zone{false};
 };
 
 struct SteeringDynamicsDeltaState
 {
-  double d_angular_position;
-  double d_angular_velocity;
+  double d_angular_position{0.0};
+  double d_angular_velocity{0.0};
 };
 
 class SteeringDynamics
@@ -120,6 +120,8 @@ public:
   [[nodiscard]] SteeringDynamicsState get_state() const;
 
   void clear_state();
+
+  void set_steer(const double steer);
 
 private:
   SteeringDynamicsState state_;
@@ -146,8 +148,13 @@ public:
     const PIDControllerParams & pid_params, const SteeringDynamicsParams & dynamics_params,
     const std::map<std::string, double> & params);
 
-  double update_kutta_update(
+  double update_euler(
+    const double input_angle, const double speed, const double prev_input_angle, const double dt);    
+
+  double update_runge_kutta(
     const double input_angle, const double speed, const double prev_input_angle, const double dt);
+
+  void set_steer(const double steer);
 
 private:
   DelayBuffer delay_buffer_;

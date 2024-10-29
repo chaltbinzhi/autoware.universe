@@ -289,6 +289,27 @@ private:
    */
   void update(const double & dt) override;
 
+
+  void updateRungeKuttaWithController(const double dt, const Eigen::VectorXd & input);
+
+  /**
+   * @brief calculate derivative of longitudinal states
+   * @param [in] state current model state
+   * @param [in] input input vector to model
+   * @return derivative of longitudinal states except steering
+   */
+  Eigen::VectorXd calcLongitudinalModel(
+    const Eigen::VectorXd & state, const Eigen::VectorXd & input);
+
+  /**
+   * @brief calculate derivative of lateral states
+   * @param [in] steer current steering angle [rad]
+   * @param [in] steer_input desired steering angle [rad]
+   * @param [in] vel current velocity [m/s]
+   * @return derivative of lateral states
+   */
+  double calcLateralModel(const double steer, const double steer_des, const double vel);
+
   /**
    * @brief calculate derivative of states with time delay steering model
    * @param [in] state current model state

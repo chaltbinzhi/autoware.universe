@@ -253,7 +253,9 @@ void SimModelActuationCmd::update(const double & dt)
   delayed_input(IDX_U::SLOPE_ACCX) = input_(IDX_U::SLOPE_ACCX);
 
   const auto prev_state = state_;
-  updateRungeKutta(dt, delayed_input);
+
+  updateRungeKuttaWithController(dt, delayed_input);
+  // updateRungeKutta(dt, delayed_input);
 
   // take velocity/steer limit explicitly
   state_(IDX::VX) = std::clamp(state_(IDX::VX), -vx_lim_, vx_lim_);
@@ -279,86 +281,77 @@ void SimModelActuationCmd::initializeInputQueue(const double & dt)
   std::fill(steer_input_queue_.begin(), steer_input_queue_.end(), 0.0);
 }
 
-void SimModelActuationCmd::updateRungeKuttaWithController(const double input_angle, const double speed, const double prev_input_angle, const double dt){
-  using autoware_vehicle_msgs::msg::GearCommand;
+void SimModelActuationCmd::updateRungeKuttaWithController(
+  const double dt, const Eigen::VectorXd & input)
+{
+  // 1) update longitudinal states
+  const Eigen::VectorXd k1_longitudinal = calcLongitudinalModel(state_, input);
+  const Eigen::VectorXd k2_longitudinal =
+    calcLongitudinalModel(state_ + dt / 2.0 * k1_longitudinal, input);
+  const Eigen::VectorXd k3_longitudinal =
+    calcLongitudinalModel(state_ + dt / 2.0 * k2_longitudinal, input);
+  const Eigen::VectorXd k4_longitudinal =
+    calcLongitudinalModel(state_ + dt * k3_longitudinal, input);
+  state_ +=
+    dt / 6.0 * (k1_longitudinal + 2.0 * k2_longitudinal + 2.0 * k3_longitudinal + k4_longitudinal);
 
-  const double vel = std::clamp(state(IDX::VX), -vx_lim_, vx_lim_);
-  const double acc = std::clamp(state(IDX::ACCX), -vx_rate_lim_, vx_rate_lim_);
-  const double yaw = state(IDX::YAW);
-  const double steer = state(IDX::STEER);
+  // 2) update lateral states
+  const double steer = state_(IDX::STEER);
+  const double steer_des = input(IDX_U::STEER_DES);
+  const double vel = state_(IDX::VX);
+  // const double k1_lateral = calcLateralModel(steer, steer_des, vel);
+  // const double k2_lateral = calcLateralModel(
+  //   steer + dt / 2.0 * k1_lateral, steer_des, vel + dt / 2.0 * k1_longitudinal(IDX::VX));
+  // const double k3_lateral = calcLateralModel(
+  //   steer + dt / 2.0 * k2_lateral, steer_des, vel + dt / 2.0 * k2_longitudinal(IDX::VX));
+  // const double k4_lateral =
+  //   calcLateralModel(steer + dt * k3_lateral, steer_des, vel + dt * k3_longitudinal(IDX::VX));
 
-  const double accel = input(IDX_U::ACCEL_DES);
-  const double brake = input(IDX_U::BRAKE_DES);
-  const auto gear = input(IDX_U::GEAR);
+  // state_(IDX::STEER) += dt / 6.0 * (k1_lateral + 2.0 * k2_lateral + 2.0 * k3_lateral +
+  // k4_lateral);
 
-  // 1) calculate acceleration by accel and brake command
-  const double acc_des_wo_slope = std::clamp(
-    std::invoke([&]() -> double {
-      // Select the non-zero value between accel and brake and calculate the acceleration
-      if (convert_accel_cmd_ && accel > 0.0) {
-        // convert accel command to acceleration
-        return accel_map_.getControlCommand(accel, vel);
-      } else if (convert_brake_cmd_ && brake > 0.0) {
-        // convert brake command to acceleration
-        return brake_map_.getControlCommand(brake, vel);
-      } else {
-        // if conversion is disabled, accel command is directly used as acceleration
-        return accel;
-      }
-    }),
-    -vx_rate_lim_, vx_rate_lim_);
-  // add slope acceleration considering the gear state
-  const double acc_by_slope = input(IDX_U::SLOPE_ACCX);
-  const double acc_des = std::invoke([&]() -> double {
-    if (gear == GearCommand::NONE || gear == GearCommand::PARK) {
-      return 0.0;
-    } else if (gear == GearCommand::REVERSE || gear == GearCommand::REVERSE_2) {
-      return -acc_des_wo_slope + acc_by_slope;
-    }
-    return acc_des_wo_slope + acc_by_slope;
-  });
-  const double acc_time_constant = accel > 0.0 ? accel_time_constant_ : brake_time_constant_;
-  const double d_acc = -(acc - acc_des) / acc_time_constant;
-
-  // 2) calculate steering rate by steer command
-  const double steer_des = calculateSteeringTireCommand(vel, steer, input(IDX_U::STEER_DES));
-
-  steering_controller_.update_runge_kutta(steer_des, speed, prev_input_angle, dt);
-
-
-  
+  const double steer_tire_des = calculateSteeringTireCommand(vel, steer, steer_des);
+  std::cerr << "dt: " << dt << std::endl;
+  std::cerr << "vel: " << vel << std::endl;
+  std::cerr << "steer: " << steer << std::endl;
+  std::cerr << "steer_des: " << steer_des << std::endl;
+  std::cerr << "steer_tire_des: " << steer_tire_des << std::endl;
+  const double prev_steer_tire_des = steer;  // todo
+  steering_controller_.set_steer(state_(IDX::STEER));
+  const double new_steer =
+    steering_controller_.update_runge_kutta(steer_tire_des, vel, prev_steer_tire_des, dt);
+  std::cerr << state_(IDX::STEER) << " -> " << new_steer << std::endl;
+  state_(IDX::STEER) =new_steer;
+    //   steering_controller_.update_runge_kutta(steer_tire_des, vel, prev_steer_tire_des, dt);
+    // steering_controller_.update_euler(steer_tire_des, vel, prev_steer_tire_des, dt);
 }
 
-Eigen::VectorXd SimModelActuationCmd::calcModel(
+Eigen::VectorXd SimModelActuationCmd::calcLongitudinalModel(
   const Eigen::VectorXd & state, const Eigen::VectorXd & input)
 {
   using autoware_vehicle_msgs::msg::GearCommand;
 
   const double vel = std::clamp(state(IDX::VX), -vx_lim_, vx_lim_);
   const double acc = std::clamp(state(IDX::ACCX), -vx_rate_lim_, vx_rate_lim_);
-  const double yaw = state(IDX::YAW);
   const double steer = state(IDX::STEER);
-
+  const double yaw = state(IDX::YAW);
   const double accel = input(IDX_U::ACCEL_DES);
   const double brake = input(IDX_U::BRAKE_DES);
   const auto gear = input(IDX_U::GEAR);
 
-  // 1) calculate acceleration by accel and brake command
+  // calculate acceleration by accel and brake command
   const double acc_des_wo_slope = std::clamp(
     std::invoke([&]() -> double {
-      // Select the non-zero value between accel and brake and calculate the acceleration
       if (convert_accel_cmd_ && accel > 0.0) {
-        // convert accel command to acceleration
         return accel_map_.getControlCommand(accel, vel);
       } else if (convert_brake_cmd_ && brake > 0.0) {
-        // convert brake command to acceleration
         return brake_map_.getControlCommand(brake, vel);
       } else {
-        // if conversion is disabled, accel command is directly used as acceleration
         return accel;
       }
     }),
     -vx_rate_lim_, vx_rate_lim_);
+
   // add slope acceleration considering the gear state
   const double acc_by_slope = input(IDX_U::SLOPE_ACCX);
   const double acc_des = std::invoke([&]() -> double {
@@ -371,36 +364,44 @@ Eigen::VectorXd SimModelActuationCmd::calcModel(
   });
   const double acc_time_constant = accel > 0.0 ? accel_time_constant_ : brake_time_constant_;
 
-  // 2) calculate steering rate by steer command
+  // calculate derivative of longitudinal states except steering
+  Eigen::VectorXd d_longitudinal_state = Eigen::VectorXd::Zero(dim_x_);
+  d_longitudinal_state(IDX::X) = vel * cos(yaw);
+  d_longitudinal_state(IDX::Y) = vel * sin(yaw);
+  d_longitudinal_state(IDX::YAW) = vel * std::tan(steer) / wheelbase_;
+  d_longitudinal_state(IDX::VX) = acc;
+  d_longitudinal_state(IDX::ACCX) = -(acc - acc_des) / acc_time_constant;
+
+  return d_longitudinal_state;
+}
+
+double SimModelActuationCmd::calcLateralModel(
+  const double steer, const double steer_input, const double vel)
+{
   const double steer_rate = std::clamp(
     std::invoke([&]() -> double {
-      // if conversion is enabled, calculate steering rate from steer command
       if (convert_steer_cmd_) {
         if (actuation_sim_type_ == ActuationSimType::VGR) {
-          // convert steer wheel command to steer rate
-          const double steer_des =
-            calculateSteeringTireCommand(vel, steer, input(IDX_U::STEER_DES));
+          const double steer_des = calculateSteeringTireCommand(vel, steer, steer_input);
           return -(getSteer() - steer_des) / steer_time_constant_;
         } else if (actuation_sim_type_ == ActuationSimType::STEER_MAP) {
-          // convert steer command to steer rate
-          return steer_map_.getControlCommand(input(IDX_U::STEER_DES), vel) / steer_time_constant_;
+          return steer_map_.getControlCommand(steer_input, vel) / steer_time_constant_;
         }
       }
-      // otherwise, steer command is desired steering angle, so calculate steering rate from the
-      // difference between the desired steering angle and the current steering angle.
-      const double steer_des = std::clamp(input(IDX_U::STEER_DES), -steer_lim_, steer_lim_);
+      const double steer_des = std::clamp(steer_input, -steer_lim_, steer_lim_);
       return -(getSteer() - steer_des) / steer_time_constant_;
     }),
     -steer_rate_lim_, steer_rate_lim_);
 
-  Eigen::VectorXd d_state = Eigen::VectorXd::Zero(dim_x_);
-  d_state(IDX::X) = vel * cos(yaw);
-  d_state(IDX::Y) = vel * sin(yaw);
-  d_state(IDX::YAW) = vel * std::tan(steer) / wheelbase_;
-  d_state(IDX::VX) = acc;
-  d_state(IDX::STEER) = steer_rate;
-  d_state(IDX::ACCX) = -(acc - acc_des) / acc_time_constant;
+  return steer_rate;
+}
 
+Eigen::VectorXd SimModelActuationCmd::calcModel(
+  const Eigen::VectorXd & state, const Eigen::VectorXd & input)
+{
+  Eigen::VectorXd d_state = calcLongitudinalModel(state, input);
+  d_state(IDX::STEER) =
+    calcLateralModel(state(IDX::STEER), input(IDX_U::STEER_DES), state(IDX::VX));
   return d_state;
 }
 
